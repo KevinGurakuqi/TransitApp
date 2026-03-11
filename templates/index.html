@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transit Comparator - Compare Ride Share vs Public Transit</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script>
+        const GOOGLE_MAPS_API_KEY = '{{ google_maps_api_key }}';
+    </script>
+    <script src="https://maps.googleapis.com/maps/api/js?key={{ google_maps_api_key }}&libraries=places&callback=initMap" async defer></script>
+</head>
+<body>
+    <!-- Full-screen map (background) -->
+    <div id="map"></div>
+
+    <!-- Top-left: search box (Google Maps style) -->
+    <div class="search-box">
+        <div class="search-box-header">
+            <span class="search-box-title">Transit Comparator</span>
+            <button id="darkModeToggle" class="dark-mode-toggle" title="Toggle dark mode">🌙</button>
+        </div>
+        <form id="routeForm" onsubmit="return false;">
+            <div class="search-row">
+                <span class="search-label">From</span>
+                <input type="text" id="start" name="start" placeholder="Start location" required autocomplete="off">
+            </div>
+            <div class="search-row">
+                <span class="search-label">To</span>
+                <input type="text" id="end" name="end" placeholder="Destination" required autocomplete="off">
+            </div>
+            <button type="submit" id="submitBtn">Get routes</button>
+        </form>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loading" class="loading-overlay hidden">
+        <div class="spinner"></div>
+        <p>Finding routes...</p>
+    </div>
+
+    <!-- Error message (top-left below search or inline) -->
+    <div id="error" class="error-toast hidden"></div>
+
+    <!-- Left panel: cost + transit options (appears after results) -->
+    <div id="leftPanel" class="left-panel hidden">
+        <div id="ride" class="panel-section rideshare-section rideshare-option active">
+            <h3 class="panel-title">🚗 Ride share</h3>
+            <div class="panel-price" id="ridePrice">—</div>
+            <div class="panel-meta">
+                <span id="rideTime">—</span> · <span id="rideDistance">—</span>
+            </div>
+            <span id="priceType" class="price-badge"></span>
+        </div>
+
+        <div class="panel-section transit-section">
+            <h3 class="panel-title">🚌 Transit</h3>
+            <div id="transitOptionsList" class="transit-options-list"></div>
+        </div>
+
+        <div id="walkingSection" class="panel-section walking-section hidden">
+            <h3 class="panel-title">🚶 Walking</h3>
+            <div class="panel-meta"><span id="walkingTime">—</span> · <span id="walkingDistance">—</span></div>
+        </div>
+
+        <div id="transitAlerts" class="panel-alerts hidden"></div>
+
+        <div class="panel-actions">
+            <button id="shareBtn" class="panel-btn">📤 Share</button>
+            <button id="copyBtn" class="panel-btn">📋 Copy</button>
+        </div>
+    </div>
+
+    <!-- Map error placeholder (replaces map div content if API fails) -->
+    <div id="mapErrorContainer" class="map-error-container hidden"></div>
+
+    <script>
+        const form = document.getElementById('routeForm');
+        const loading = document.getElementById('loading');
+        const errorEl = document.getElementById('error');
+        const leftPanel = document.getElementById('leftPanel');
+        const submitBtn = document.getElementById('submitBtn');
+
+        let map;
+        let directionsService;
+        let directionsRenderer;
+        let startMarker;
+        let endMarker;
+        let currentRouteMode = 'DRIVING';
+        let currentTransitRoutes = null;
+        let currentStartCoords = null;
+        let currentEndCoords = null;
+        let currentStartAddress = '';
+        let currentEndAddress = '';
+        let selectedRouteIndex = 0;
+
+        (function setUrlParams() {
+            var params = new URLSearchParams(window.location.search);
+            var startEl = document.getElementById('start');
+            var endEl = document.getElementById('end');
+            if (startEl && params.get('start')) startEl.value = params.get('start');
+            if (endEl && params.get('end')) endEl.value = params.get('end');
+        })();
+
+        function showMapError(message, errorDetails, errorObj) {
+            var details = errorDetails || '';
+            if (errorObj) {
+                var parts = [];
+                if (errorObj.name) parts.push('Error: ' + errorObj.name);
+                if (errorObj.code) parts.push('Code: ' + errorObj.code);
+                if (errorObj.message) parts.push(errorObj.message);
+                if (parts.length) details = (details ? details + '\n\n' : '') + parts.join('\n');
+            }
+            var help = '<div class="map-error-help"><p class="map-error-help-title">Common causes and fixes:</p><ul>' +
+                '<li><strong>RefererNotAllowedMapError</strong> – Add this site (e.g. <code>localhost</code>, <code>127.0.0.1</code>, or your domain) under API key → Application restrictions → HTTP referrers.</li>' +
+                '<li><strong>ApiNotActivatedMapError</strong> – In Google Cloud Console, enable <strong>Maps JavaScript API</strong> and <strong>Directions API</strong> (and Geocoding API) for your project.</li>' +
+                '<li><strong>InvalidKeyMapError</strong> – Check the key in <code>router.py</code> and in Google Cloud → Credentials.</li>' +
+                '<li>Open <strong>F12 → Console</strong> for the exact error name and message.</li>' +
+                '</ul></div>';
+            var container = document.getElementById('mapErrorContainer');
+            container.innerHTML = '<div class="map-error-inner"><p class="map-error-title">' + (message || 'Map error') + '</p>' +
+                (details ? '<p class="map-error-details">' + details.replace(/\n/g, '<br>') + '</p>' : '') + help + '</div>';
+            container.classList.remove('hidden');
+            hideGoogleDefaultMapError();
+        }
+
+        function hideGoogleDefaultMapError() {
+            setTimeout(function() {
+                var mapEl = document.getElementById('map');
+                if (!mapEl) return;
+                var divs = mapEl.querySelectorAll('div[class*="gm-"], div[style*="position"]');
+                for (var i = 0; i < divs.length; i++) {
+                    if (divs[i].textContent && (divs[i].textContent.indexOf("can't load") !== -1 || divs[i].textContent.indexOf("didn't load") !== -1)) {
+                        divs[i].style.setProperty('display', 'none', 'important');
+                    }
+                }
+            }, 200);
+        }
+
+        function checkForGoogleMapError() {
+            var mapEl = document.getElementById('map');
+            if (!mapEl || map) return;
+            var text = mapEl.innerText || mapEl.textContent || '';
+            if (text.indexOf("can't load") !== -1 || text.indexOf("didn't load") !== -1) {
+                showMapError('Google Maps could not load', 'Open F12 → Console to see the exact error (e.g. RefererNotAllowedMapError, ApiNotActivatedMapError).', null);
+                hideGoogleDefaultMapError();
+            }
+        }
+
+        function initMap() {
+            async function createMap() {
+                try {
+                    if (typeof google === 'undefined' || !google.maps) {
+                        showMapError('Google Maps API failed to load.', 'Check browser console (F12) and API key.');
+                        return;
+                    }
+                    if (!GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_API_KEY.length < 20) {
+                        showMapError('Invalid API Key', 'Check router.py for GOOGLE_MAPS_API_KEY.');
+                        return;
+                    }
+                    var mapElement = document.getElementById('map');
+                    if (!mapElement) return;
+
+                    var defaultLocation = { lat: 43.6532, lng: -79.3832 };
+                    map = new google.maps.Map(mapElement, {
+                        zoom: 12,
+                        center: defaultLocation,
+                        mapTypeControl: true,
+                        streetViewControl: true,
+                        fullscreenControl: true,
+                        zoomControl: true,
+                        zoomControlOptions: { position: google.maps.ControlPosition.RIGHT_BOTTOM }
+                    });
+
+                    google.maps.event.addListener(map, 'error', function(e) {
+                        showMapError('Map error', (e && e.message) ? e.message : 'Unknown error');
+                    });
+
+                    directionsService = new google.maps.DirectionsService();
+                    directionsRenderer = new google.maps.DirectionsRenderer({
+                        map: map,
+                        suppressMarkers: true,
+                        preserveViewport: false,
+                        polylineOptions: { strokeColor: '#1a73e8', strokeWeight: 5 }
+                    });
+
+                } catch (err) {
+                    console.error('Error initializing map:', err);
+                    var errInfo = { name: err.name, message: err.message };
+                    if (err.code !== undefined) errInfo.code = err.code;
+                    if (typeof err.endpoint === 'string') errInfo.code = (errInfo.code ? errInfo.code + ' ' : '') + err.endpoint;
+                    showMapError('Map could not load', err.message || 'Unknown error', errInfo);
+                }
+            }
+            if (document.readyState === 'complete') {
+                createMap();
+            } else {
+                window.addEventListener('load', function() { createMap(); });
+            }
+            setTimeout(checkForGoogleMapError, 3000);
+        }
+
+        window.initMap = initMap;
+        window.gm_authFailure = function() {
+            showMapError('Google Maps authentication failed', 'Usually: invalid key, key restrictions (add this site as allowed referrer), or Maps JavaScript API / Directions API not enabled. See help below.', { name: 'gm_authFailure' });
+        };
+
+        window.addEventListener('error', function(event) {
+            var msg = event.message || '';
+            var filename = event.filename || '';
+            if (msg && (msg.toLowerCase().indexOf('maps') !== -1 || msg.toLowerCase().indexOf('google') !== -1 || filename.indexOf('maps') !== -1)) {
+                showMapError('Google Maps error', msg, { name: event.error && event.error.name, message: msg });
+            }
+        });
+
+        function updateMap(startCoords, endCoords, startAddress, endAddress, mode, transitRoutes) {
+            if (!map || !directionsService || !directionsRenderer) {
+                if (typeof google !== 'undefined' && google.maps) setTimeout(function() {
+                    if (map && directionsService && directionsRenderer) {
+                        updateMapRoute(startCoords, endCoords, startAddress, endAddress, mode, transitRoutes);
+                    }
+                }, 500);
+                return;
+            }
+            updateMapRoute(startCoords, endCoords, startAddress, endAddress, mode, transitRoutes);
+        }
+
+        function updateMapRoute(startCoords, endCoords, startAddress, endAddress, mode, transitRoutes) {
+            if (!map || !directionsService || !directionsRenderer) return;
+            try {
+                currentStartCoords = startCoords;
+                currentEndCoords = endCoords;
+                currentStartAddress = startAddress;
+                currentEndAddress = endAddress;
+                currentRouteMode = mode;
+
+                var start = new google.maps.LatLng(startCoords.lat, startCoords.lng);
+                var end = new google.maps.LatLng(endCoords.lat, endCoords.lng);
+
+                if (startMarker) startMarker.setMap(null);
+                if (endMarker) endMarker.setMap(null);
+
+                startMarker = new google.maps.Marker({
+                    position: start,
+                    map: map,
+                    title: startAddress,
+                    icon: {
+                        path: google.maps.SymbolPath.CIRCLE,
+                        scale: 10,
+                        fillColor: '#34a853',
+                        fillOpacity: 1,
+                        strokeColor: '#fff',
+                        strokeWeight: 2
+                    },
+                    label: { text: 'A', color: 'white', fontSize: '12px', fontWeight: 'bold' }
+                });
+                endMarker = new google.maps.Marker({
+                    position: end,
+                    map: map,
+                    title: endAddress,
+                    icon: {
+                        path: google.maps.SymbolPath.CIRCLE,
+                        scale: 10,
+                        fillColor: '#ea4335',
+                        fillOpacity: 1,
+                        strokeColor: '#fff',
+                        strokeWeight: 2
+                    },
+                    label: { text: 'B', color: 'white', fontSize: '12px', fontWeight: 'bold' }
+                });
+
+                var TravelMode = google.maps.TravelMode || { TRANSIT: 'TRANSIT', DRIVING: 'DRIVING' };
+                var travelMode = mode === 'TRANSIT' ? TravelMode.TRANSIT : TravelMode.DRIVING;
+                var request = { origin: start, destination: end, travelMode: travelMode, provideRouteAlternatives: false };
+                directionsService.route(request, function(result, status) {
+                    if (status === 'OK' && result.routes && result.routes[0]) {
+                        directionsRenderer.setDirections(result);
+                        var strokeColor = mode === 'TRANSIT' ? '#1a73e8' : '#1a73e8';
+                        directionsRenderer.setOptions({
+                            polylineOptions: { strokeColor: strokeColor, strokeWeight: 5 }
+                        });
+                        var bounds = new google.maps.LatLngBounds();
+                        var route = result.routes[0];
+                        if (route.overview_path && route.overview_path.length) {
+                            route.overview_path.forEach(function(p) { bounds.extend(p); });
+                        } else {
+                            route.legs.forEach(function(leg) {
+                                bounds.extend(leg.start_location);
+                                bounds.extend(leg.end_location);
+                            });
+                        }
+                        map.fitBounds(bounds);
+                    } else {
+                        var bounds = new google.maps.LatLngBounds();
+                        bounds.extend(start);
+                        bounds.extend(end);
+                        map.fitBounds(bounds);
+                    }
+                });
+            } catch (e) {
+                console.error('Error updating map:', e);
+            }
+        }
+
+        function switchRouteMode(mode) {
+            if (!currentStartCoords || !currentEndCoords) return;
+            currentRouteMode = mode;
+            updateMap(currentStartCoords, currentEndCoords, currentStartAddress, currentEndAddress, mode);
+            setActivePanelOption(mode === 'DRIVING' ? 'ride' : 'transit-' + selectedRouteIndex);
+        }
+
+        function setActivePanelOption(id) {
+            document.querySelectorAll('.transit-option, .rideshare-option').forEach(function(el) {
+                el.classList.remove('active');
+            });
+            var el = document.getElementById(id);
+            if (el) el.classList.add('active');
+        }
+
+        function updateMapWithTransitRoute(routeIndex) {
+            if (!map || !directionsService || !directionsRenderer || !currentStartCoords || !currentEndCoords) return;
+            var TravelMode = google.maps.TravelMode || { TRANSIT: 'TRANSIT', DRIVING: 'DRIVING' };
+            currentRouteMode = 'TRANSIT';
+            selectedRouteIndex = routeIndex;
+            setActivePanelOption('transit-' + routeIndex);
+            var start = new google.maps.LatLng(currentStartCoords.lat, currentStartCoords.lng);
+            var end = new google.maps.LatLng(currentEndCoords.lat, currentEndCoords.lng);
+            var request = {
+                origin: start,
+                destination: end,
+                travelMode: TravelMode.TRANSIT,
+                provideRouteAlternatives: true
+            };
+            directionsService.route(request, function(result, status) {
+                if (status === 'OK' && result && result.routes && result.routes[routeIndex]) {
+                    var selectedRoute = result.routes[routeIndex];
+                    var dirResult = {
+                        routes: [selectedRoute],
+                        geocoded_waypoints: result.geocoded_waypoints || [],
+                        request: request
+                    };
+                    try {
+                        directionsRenderer.setDirections(dirResult);
+                        directionsRenderer.setOptions({
+                            polylineOptions: { strokeColor: '#1a73e8', strokeWeight: 6 }
+                        });
+                        var bounds = new google.maps.LatLngBounds();
+                        if (selectedRoute.overview_path && selectedRoute.overview_path.length) {
+                            selectedRoute.overview_path.forEach(function(p) { bounds.extend(p); });
+                        } else if (selectedRoute.legs) {
+                            selectedRoute.legs.forEach(function(leg) {
+                                bounds.extend(leg.start_location);
+                                bounds.extend(leg.end_location);
+                            });
+                        }
+                        map.fitBounds(bounds);
+                    } catch (err) {
+                        console.error('Error setting transit route on map:', err);
+                    }
+                }
+            });
+        }
+
+        if (form) {
+            form.addEventListener('submit', async function(e) {
+                e.preventDefault();
+                var start = document.getElementById('start').value.trim();
+                var end = document.getElementById('end').value.trim();
+                if (!start || !end) {
+                    errorEl.textContent = 'Enter start and destination';
+                    errorEl.classList.remove('hidden');
+                    setTimeout(function() { errorEl.classList.add('hidden'); }, 4000);
+                    return false;
+                }
+
+                leftPanel.classList.add('hidden');
+                errorEl.classList.add('hidden');
+                loading.classList.remove('hidden');
+                submitBtn.disabled = true;
+
+                try {
+                    var controller = new AbortController();
+                    var timeoutId = setTimeout(function() { controller.abort(); }, 30000);
+                    var response = await fetch('/api/compare', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ start: start, end: end }),
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    var data = await response.json();
+
+                    if (!response.ok) throw new Error(data.error || 'An error occurred');
+
+                    displayResults(data);
+
+                    if (data.start_coords && data.end_coords) {
+                        updateMap(
+                            data.start_coords,
+                            data.end_coords,
+                            data.start_address,
+                            data.end_address,
+                            'DRIVING',
+                            data.transit_routes
+                        );
+                        if (map && typeof google !== 'undefined' && google.maps && google.maps.event) {
+                            setTimeout(function() { google.maps.event.trigger(map, 'resize'); }, 100);
+                        }
+                    }
+                    setActivePanelOption('ride');
+                } catch (err) {
+                    if (err.name === 'AbortError') {
+                        errorEl.textContent = 'Request timed out. Try again.';
+                    } else {
+                        errorEl.textContent = err.message || 'Something went wrong.';
+                    }
+                    errorEl.classList.remove('hidden');
+                    setTimeout(function() { errorEl.classList.add('hidden'); }, 5000);
+                } finally {
+                    loading.classList.add('hidden');
+                    submitBtn.disabled = false;
+                }
+                return false;
+            });
+        }
+
+        if (submitBtn) {
+            submitBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            });
+        }
+
+        function displayResults(data) {
+            leftPanel.classList.remove('hidden');
+
+            if (data.ride_share) {
+                document.getElementById('ridePrice').textContent = data.ride_share.price;
+                document.getElementById('rideTime').textContent = data.ride_share.time;
+                document.getElementById('rideDistance').textContent = data.ride_share.distance;
+                var priceType = document.getElementById('priceType');
+                priceType.textContent = data.ride_share.price_type === 'real' ? 'Real Uber' : 'Est.';
+                priceType.className = 'price-badge ' + (data.ride_share.price_type === 'real' ? 'real' : 'est');
+            }
+
+            var list = document.getElementById('transitOptionsList');
+            list.innerHTML = '';
+            var routes = (data.transit_routes && data.transit_routes.length > 0) ? data.transit_routes : (data.transit ? [{
+                time: data.transit.time,
+                distance: data.transit.distance,
+                price: data.transit.price,
+                num_transfers: 0
+            }] : []);
+            currentTransitRoutes = routes;
+            routes.forEach(function(route, index) {
+                var div = document.createElement('div');
+                div.className = 'transit-option' + (index === 0 ? ' active' : '');
+                div.id = 'transit-' + index;
+                div.innerHTML = '<span class="transit-option-time">' + (routes.length > 1 ? 'Route ' + (index + 1) + ': ' : '') + route.time + '</span><span class="transit-option-meta">' + route.distance + ' · ' + route.price + (route.num_transfers > 0 ? ' · ' + route.num_transfers + ' transfer(s)' : '') + '</span>';
+                div.onclick = (function(i) { return function() {
+                    updateMapWithTransitRoute(i);
+                }; })(index);
+                list.appendChild(div);
+            });
+
+            var walkSec = document.getElementById('walkingSection');
+            if (data.walking) {
+                document.getElementById('walkingTime').textContent = data.walking.time;
+                document.getElementById('walkingDistance').textContent = data.walking.distance;
+                walkSec.classList.remove('hidden');
+            } else {
+                walkSec.classList.add('hidden');
+            }
+
+            var alertsEl = document.getElementById('transitAlerts');
+            if (data.transit_alerts && data.transit_alerts.length > 0) {
+                alertsEl.innerHTML = '<h4>⚠️ Alerts</h4><ul>' + data.transit_alerts.map(function(a) { return '<li>' + a + '</li>'; }).join('') + '</ul>';
+                alertsEl.classList.remove('hidden');
+            } else {
+                alertsEl.classList.add('hidden');
+            }
+        }
+
+        var darkModeToggle = document.getElementById('darkModeToggle');
+        var isDarkMode = localStorage.getItem('darkMode') === 'true';
+        if (isDarkMode) {
+            document.body.classList.add('dark-mode');
+            darkModeToggle.textContent = '☀️';
+        }
+        darkModeToggle.addEventListener('click', function() {
+            document.body.classList.toggle('dark-mode');
+            var isDark = document.body.classList.contains('dark-mode');
+            localStorage.setItem('darkMode', isDark);
+            darkModeToggle.textContent = isDark ? '☀️' : '🌙';
+        });
+
+        document.getElementById('shareBtn').addEventListener('click', function() {
+            var start = document.getElementById('start').value;
+            var end = document.getElementById('end').value;
+            var shareUrl = window.location.origin + '?start=' + encodeURIComponent(start) + '&end=' + encodeURIComponent(end);
+            if (navigator.share) {
+                navigator.share({ title: 'Route Comparison', text: 'From ' + start + ' to ' + end, url: shareUrl });
+            } else {
+                navigator.clipboard.writeText(shareUrl).then(function() { alert('Link copied!'); });
+            }
+        });
+        document.getElementById('copyBtn').addEventListener('click', function() {
+            var text = leftPanel.innerText;
+            navigator.clipboard.writeText(text).then(function() { alert('Details copied!'); });
+        });
+
+        window.addEventListener('load', function() {
+            var rideEl = document.getElementById('ride');
+            if (rideEl) rideEl.addEventListener('click', function() { switchRouteMode('DRIVING'); });
+        });
+    </script>
+</body>
+</html>

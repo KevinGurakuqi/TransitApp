@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Google Maps API Setup Guide</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .error-box {
+            background: #fee;
+            border: 2px solid #c33;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .success-box {
+            background: #efe;
+            border: 2px solid #3c3;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+        ol {
+            margin-left: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔧 Google Maps API Setup Guide</h1>
+    
+    <div class="error-box">
+        <h2>If you see "Oops! Something went wrong" in the map:</h2>
+        <p>This usually means the <strong>Maps JavaScript API</strong> is not enabled for your API key.</p>
+    </div>
+    
+    <h2>How to Fix:</h2>
+    <ol>
+        <li><strong>Go to Google Cloud Console:</strong><br>
+            <a href="https://console.cloud.google.com/apis/library" target="_blank">https://console.cloud.google.com/apis/library</a>
+        </li>
+        <li><strong>Search for "Maps JavaScript API"</strong> and click on it</li>
+        <li><strong>Click "Enable"</strong> if it's not already enabled</li>
+        <li><strong>Also enable "Directions API"</strong> (search for it and enable)</li>
+        <li><strong>Wait 1-2 minutes</strong> for the changes to propagate</li>
+        <li><strong>Refresh your website</strong></li>
+    </ol>
+    
+    <h2>Required APIs:</h2>
+    <ul>
+        <li>✅ <strong>Maps JavaScript API</strong> (for displaying the map)</li>
+        <li>✅ <strong>Directions API</strong> (for showing routes)</li>
+        <li>✅ <strong>Geocoding API</strong> (already enabled - for address lookup)</li>
+        <li>✅ <strong>Distance Matrix API</strong> (already enabled - for route calculations)</li>
+    </ul>
+    
+    <h2>Check Your API Key Restrictions:</h2>
+    <p>If you have API key restrictions enabled, make sure:</p>
+    <ul>
+        <li>Your website domain is allowed (or use no restrictions for testing)</li>
+        <li>The APIs listed above are allowed</li>
+    </ul>
+    
+    <div class="success-box">
+        <h2>✅ After enabling the APIs:</h2>
+        <p>Refresh your browser and try searching for a route again. The map should work!</p>
+    </div>
+</body>
+</html>
